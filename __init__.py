@@ -11,12 +11,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import re
 import time
-from mycroft.messagebus.message import Message
-from mycroft import FallbackSkill
 from threading import Lock
 
+from mycroft import FallbackSkill
 
 EXTENSION_TIME = 10
 
@@ -24,7 +22,7 @@ EXTENSION_TIME = 10
 class QuestionsAnswersSkill(FallbackSkill):
     def __init__(self):
         super().__init__()
-        self.query_replies = {}     # cache of received replies
+        self.query_replies = {}  # cache of received replies
         self.query_extensions = {}  # maintains query timeout extensions
         self.lock = Lock()
         self.waiting = True
@@ -35,8 +33,6 @@ class QuestionsAnswersSkill(FallbackSkill):
                        self.handle_query_response)
         self.register_fallback(self.handle_question, 5)
 
-
-    #@intent_handler(AdaptIntent().require('Question'))
     def handle_question(self, message):
         """ Send the phrase to the CommonQuerySkills and prepare for handling
             the replies.
@@ -50,7 +46,7 @@ class QuestionsAnswersSkill(FallbackSkill):
         self.query_extensions[utt] = []
         self.log.info('Searching for {}'.format(utt))
         # Send the query to anyone listening for them
-        self.bus.emit(Message('question:query', data={'phrase': utt}))
+        self.bus.emit(message.reply('question:query', data={'phrase': utt}))
 
         self.timeout_time = time.time() + 1
         self.schedule_event(self._query_timeout, 1,
@@ -131,7 +127,7 @@ class QuestionsAnswersSkill(FallbackSkill):
                 # invoke best match
                 self.speak(best['answer'])
                 self.log.info('Handling with: ' + str(best['skill_id']))
-                self.bus.emit(Message('question:action',
+                self.bus.emit(message.forward('question:action',
                                       data={'skill_id': best['skill_id'],
                                             'phrase': search_phrase,
                                             'callback_data':
