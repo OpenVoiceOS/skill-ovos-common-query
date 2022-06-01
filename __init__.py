@@ -44,9 +44,12 @@ class QuestionsAnswersSkill(FallbackSkill):
 
         self.query_replies[utt] = []
         self.query_extensions[utt] = []
-        self.log.info('Searching for {}'.format(utt))
+        self.log.info(f'Searching for {utt}')
         # Send the query to anyone listening for them
-        self.bus.emit(message.reply('question:query', data={'phrase': utt}))
+        msg = message.reply('question:query', data={'phrase': utt})
+        if "skill_id" not in msg.context:
+            msg.context["skill_id"] = self.skill_id
+        self.bus.emit(msg)
 
         self.timeout_time = time.time() + 1
         self.schedule_event(self._query_timeout, 1,
@@ -56,8 +59,7 @@ class QuestionsAnswersSkill(FallbackSkill):
         while True:
             if not self.waiting or time.time() > self.timeout_time + 1:
                 break
-
-            time.sleep(1)
+            time.sleep(0.1)
         return self.answered
 
     def handle_query_response(self, message):
