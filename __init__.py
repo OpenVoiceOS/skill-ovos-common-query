@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import time
-from threading import Lock
+from threading import Lock, Event
 
 from mycroft import FallbackSkill
 
@@ -25,18 +25,19 @@ class QuestionsAnswersSkill(FallbackSkill):
         self.query_replies = {}  # cache of received replies
         self.query_extensions = {}  # maintains query timeout extensions
         self.lock = Lock()
+        self.searching = Event()
         self.waiting = True
         self.answered = False
 
     def initialize(self):
-        self.add_event('question:query.response',
-                       self.handle_query_response)
+        self.add_event('question:query.response', self.handle_query_response)
         self.register_fallback(self.handle_question, 5)
 
     def handle_question(self, message):
         """ Send the phrase to the CommonQuerySkills and prepare for handling
             the replies.
         """
+        self.searching.set()
         self.waiting = True
         self.answered = False
         utt = message.data.get('utterance')
@@ -52,55 +53,50 @@ class QuestionsAnswersSkill(FallbackSkill):
         self.bus.emit(msg)
 
         self.timeout_time = time.time() + 1
-        self.schedule_event(self._query_timeout, 1,
-                            data={'phrase': utt},
-                            name='QuestionQueryTimeout')
-
-        while True:
+        while self.searching.is_set():
             if not self.waiting or time.time() > self.timeout_time + 1:
                 break
-            time.sleep(0.1)
+            time.sleep(0.2)
+
+        # forcefully timeout if search is still going
+        self._query_timeout(message)
         return self.answered
 
     def handle_query_response(self, message):
-        with self.lock:
-            search_phrase = message.data['phrase']
-            skill_id = message.data['skill_id']
-            searching = message.data.get('searching')
-            answer = message.data.get('answer')
+        search_phrase = message.data['phrase']
+        skill_id = message.data['skill_id']
+        searching = message.data.get('searching')
+        answer = message.data.get('answer')
 
-            # Manage requests for time to complete searches
-            if searching:
-                # extend the timeout by 5 seconds
-                self.cancel_scheduled_event('QuestionQueryTimeout')
-                self.timeout_time = time.time() + EXTENSION_TIME
-                self.schedule_event(self._query_timeout,
-                                    EXTENSION_TIME,
-                                    data={'phrase': search_phrase},
-                                    name='QuestionQueryTimeout')
+        # Manage requests for time to complete searches
+        if searching:
+            # extend the timeout by 5 seconds
+            self.timeout_time = time.time() + EXTENSION_TIME
+            # TODO: Perhaps block multiple extensions?
+            if (search_phrase in self.query_extensions and
+                    skill_id not in self.query_extensions[search_phrase]):
+                self.query_extensions[search_phrase].append(skill_id)
+        elif search_phrase in self.query_extensions:
+            # Search complete, don't wait on this skill any longer
+            if answer and search_phrase in self.query_replies:
+                self.log.info(f'Answer from {skill_id}')
+                self.query_replies[search_phrase].append(message.data)
 
-                # TODO: Perhaps block multiple extensions?
-                if (search_phrase in self.query_extensions and
-                        skill_id not in self.query_extensions[search_phrase]):
-                    self.query_extensions[search_phrase].append(skill_id)
-            elif search_phrase in self.query_extensions:
-                # Search complete, don't wait on this skill any longer
-                if answer and search_phrase in self.query_replies:
-                    self.log.info('Answer from {}'.format(skill_id))
-                    self.query_replies[search_phrase].append(message.data)
-                # Remove the skill from list of extensions
-                if skill_id in self.query_extensions[search_phrase]:
-                    self.query_extensions[search_phrase].remove(skill_id)
-                    if not self.query_extensions[search_phrase]:
-                        self.cancel_scheduled_event('QuestionQueryTimeout')
-                        self.schedule_event(self._query_timeout, 1,
-                                            data={'phrase': search_phrase},
-                                            name='QuestionQueryTimeout')
-            else:
-                self.log.warning('{} Answered too slowly,'
-                                 'will be ignored.'.format(skill_id))
+            # Remove the skill from list of timeout extensions
+            if skill_id in self.query_extensions[search_phrase]:
+                self.query_extensions[search_phrase].remove(skill_id)
+
+            # not waiting for any more skills
+            if not self.query_extensions[search_phrase]:
+                self._query_timeout(message)
+        else:
+            self.log.warning(f'{skill_id} Answered too slowly, will be ignored.')
 
     def _query_timeout(self, message):
+        if not self.searching.is_set():
+            return  # not searching, ignore timeout event
+        self.searching.clear()
+
         # Prevent any late-comers from retriggering this query handler
         with self.lock:
             self.log.info('Timeout occured check responses')
@@ -129,11 +125,11 @@ class QuestionsAnswersSkill(FallbackSkill):
                 # invoke best match
                 self.speak(best['answer'])
                 self.log.info('Handling with: ' + str(best['skill_id']))
+                cb = best.get('callback_data') or {}
                 self.bus.emit(message.forward('question:action',
-                                      data={'skill_id': best['skill_id'],
-                                            'phrase': search_phrase,
-                                            'callback_data':
-                                            best.get('callback_data')}))
+                                              data={'skill_id': best['skill_id'],
+                                                    'phrase': search_phrase,
+                                                    'callback_data': cb}))
                 self.answered = True
             else:
                 self.answered = False
